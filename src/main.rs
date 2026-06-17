@@ -9,6 +9,7 @@ use iroh_gossip::{
     net::Gossip,
     proto::TopicId,
 };
+use iroh_services::Client;
 use serde::{Deserialize, Serialize};
 
 /// Chat over iroh-gossip
@@ -60,6 +61,12 @@ async fn main() -> Result<()> {
     };
 
     let endpoint = Endpoint::bind(presets::N0).await?;
+
+    let _client = Client::builder(&endpoint)
+        .api_secret_from_env()?
+        .name("gossip-chat-endpoint")?
+        .build()
+        .await?;
 
     println!("> our endpoint id: {}", endpoint.id());
     let gossip = Gossip::builder().spawn(endpoint.clone());
