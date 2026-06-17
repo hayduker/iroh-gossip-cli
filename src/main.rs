@@ -1,19 +1,64 @@
 use anyhow::Result;
+use clap::Parser;
 use futures_lite::StreamExt;
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointId, EndpointAddr, endpoint::presets};
+use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::presets};
 use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::Gossip,
     proto::TopicId,
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr, collections::HashMap};
+use std::{collections::HashMap, fmt, str::FromStr};
+
+/// Chat over iroh-gossip
+///
+/// This broadcasts unsigned messages over iroh-gossip.
+///
+/// By default a new endpoint id is created when starting the example.
+///
+/// By default, we use the default n0 address lookup services to dial by `EndpointId`.
+#[derive(Parser, Debug)]
+struct Args {
+    /// Set your nickname.
+    #[clap(short, long)]
+    name: Option<String>,
+    /// Set the bind port for our socket. By default, a random port will be used.
+    #[clap(short, long, default_value = "0")]
+    bind_port: u16,
+    #[clap(subcommand)]
+    command: Command,
+}
+
+#[derive(Parser, Debug)]
+enum Command {
+    /// Open a chat room for a topic and print a ticket for others to join.
+    Open,
+    /// Join a chat room from a ticket.
+    Join {
+        /// The ticket, as base32 string.
+        ticket: String,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let endpoint = Endpoint::builder(presets::N0).bind().await?;
+    let args = Args::parse();
 
+    let (topic, endpoints) = match &args.command {
+        Command::Open => {
+            let topic = TopicId::from_bytes(rand::random());
+            println!("> opening chat room for topic {topic}");
+            (topic, vec![])
+        }
+        Command::Join { ticket } => {
+            let Ticket { topic, endpoints } = Ticket::from_str(ticket)?;
+            println!("> joining chat room for topic {topic}");
+            (topic, endpoints)
+        }
+    };
+
+    let endpoint = Endpoint::bind(presets::N0).await?;
     println!("> our endpoint id: {}", endpoint.id());
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
@@ -22,25 +67,45 @@ async fn main() -> Result<()> {
         .accept(iroh_gossip::ALPN, gossip.clone())
         .spawn();
 
-    let id = TopicId::from_bytes(rand::random());
-    let endpoint_ids = vec![];
+    let ticket = {
+        let me = endpoint.addr();
+        let endpoints = vec![me];
+        Ticket { topic, endpoints }
+    };
+    println!("> ticket to join us: {ticket}");
 
-    let topic = gossip.subscribe(id, endpoint_ids).await?;
-    let (sender, receiver) = topic.split();
+    let endpoint_ids = endpoints.iter().map(|p| p.id).collect();
+    if endpoints.is_empty() {
+        println!("> waiting for endpoints to join us...");
+    } else {
+        println!("> trying to connect to {} endpoints...", endpoints.len());
+    }
 
-    let message = Message::new(MessageBody::AboutMe {
-        from: endpoint.id(),
-        name: String::from("alice"),
-    });
-    sender.broadcast(message.to_vec().into()).await?;
+    let (sender, receiver) = gossip
+        .subscribe_and_join(topic, endpoint_ids)
+        .await?
+        .split();
+    println!("> connected!");
+
+    if let Some(name) = args.name {
+        let message = Message::new(MessageBody::AboutMe {
+            from: endpoint.id(),
+            name,
+        });
+        sender.broadcast(message.to_vec().into()).await?;
+    }
 
     tokio::spawn(subscribe_loop(receiver));
+
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel(1);
     std::thread::spawn(move || input_loop(line_tx));
 
     println!("> type a message and hit enter to broadcast...");
     while let Some(text) = line_rx.recv().await {
-        let message = Message::new(MessageBody::Message { from: endpoint.id(), text: text.clone(), });
+        let message = Message::new(MessageBody::Message {
+            from: endpoint.id(),
+            text: text.clone(),
+        });
         sender.broadcast(message.to_vec().into()).await?;
         println!("> sent: {text}");
     }
