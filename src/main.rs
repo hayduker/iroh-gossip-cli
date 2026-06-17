@@ -9,7 +9,7 @@ use iroh_gossip::{
     net::Gossip,
     proto::TopicId,
 };
-use iroh_services::Client;
+use iroh_services::{API_SECRET_ENV_VAR_NAME, ApiSecret, CLIENT_HOST_ALPN, Client, ClientHost, caps::NetDiagnosticsCap};
 use serde::{Deserialize, Serialize};
 
 /// Chat over iroh-gossip
@@ -62,16 +62,30 @@ async fn main() -> Result<()> {
 
     let endpoint = Endpoint::bind(presets::N0).await?;
 
-    let _client = Client::builder(&endpoint)
+    let secret = ApiSecret::from_env_var(API_SECRET_ENV_VAR_NAME)?;
+    let remote_id = secret.addr().id;
+
+    let client = Client::builder(&endpoint)
         .api_secret_from_env()?
         .name("gossip-chat-endpoint")?
         .build()
         .await?;
 
+    let client2 = client.clone();
+    tokio::spawn(async move {
+        client2
+            .grant_capability(remote_id, vec![NetDiagnosticsCap::GetAny])
+            .await
+            .unwrap();
+    });
+
+    let host = ClientHost::new(&endpoint);
+
     println!("> our endpoint id: {}", endpoint.id());
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
     let router = Router::builder(endpoint.clone())
+        .accept(CLIENT_HOST_ALPN, host)
         .accept(iroh_gossip::ALPN, gossip.clone())
         .spawn();
 
